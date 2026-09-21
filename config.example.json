@@ -1,0 +1,12 @@
+{
+  "Drives": ["C:\\"],
+  "WslDistribution": "Ubuntu-24.04",
+  "WslEnabled": true,
+  "WslAgentIntervalSeconds": 5,
+  "WarningFreeGiB": 30,
+  "CriticalFreeGiB": 15,
+  "EmergencyFreeGiB": 8,
+  "RapidGrowthGiBPerMinute": 1,
+  "AlertCooldownMinutes": 10,
+  "HistoryRetentionDays": 30
+}
