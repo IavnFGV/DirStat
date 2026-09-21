@@ -14,9 +14,11 @@ internal static class Program
         using var mutex = new Mutex(true, @"Local\DiskSpaceMonitor.SingleInstance", out var first);
         if (!first) return;
         ApplicationConfiguration.Initialize();
-        try { Application.Run(new MonitorContext()); }
+        var logger = new AppLogger(Path.Combine(AppContext.BaseDirectory, "monitor.log"));
+        try { Application.Run(new MonitorContext(logger)); }
         catch (Exception ex)
         {
+            logger.Error("Application startup failed", ex);
             MessageBox.Show($"Не удалось запустить Disk Space Monitor: {ex.Message}\nПроверьте права записи рядом с EXE.",
                 "Disk Space Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -26,6 +28,7 @@ internal static class Program
 internal sealed class MonitorContext : ApplicationContext
 {
     private readonly string dataDirectory = AppContext.BaseDirectory;
+    private readonly AppLogger logger;
     private readonly string configPath;
     private readonly NotifyIcon tray;
     private readonly System.Windows.Forms.Timer timer;
@@ -33,24 +36,33 @@ internal sealed class MonitorContext : ApplicationContext
     private readonly WslAgentManager? agent;
     private readonly MonitorConfig config;
     private readonly Dictionary<string, DateTimeOffset> alertTimes = new();
+    private readonly Dictionary<Color, Icon> icons = new();
     private readonly StatusForm statusForm = new();
     private readonly ToolStripMenuItem startupItem;
     private readonly ToolStripMenuItem analysisItem;
     private List<DiskReading> drives = new();
     private WslSnapshot? wsl;
     private VhdxInfo? vhdx;
+    private DateTimeOffset lastVhdxRead;
     private Trend wslTrend = new(0, 0, null);
     private DangerLevel previousWslLevel = DangerLevel.Normal;
     private bool polling, blink;
     private DateTimeOffset lastAnalysisRequest;
+    private DateTimeOffset lastPerfLog = DateTimeOffset.UtcNow;
+    private TimeSpan cpuAtLastPerfLog = Process.GetCurrentProcess().TotalProcessorTime;
+    private int refreshCount;
+    private double refreshTotalMs, refreshMaxMs;
+    private string? lastRefreshError;
 
-    public MonitorContext()
+    public MonitorContext(AppLogger logger)
     {
+        this.logger = logger;
         Directory.CreateDirectory(dataDirectory);
         configPath = Path.Combine(dataDirectory, "config.json");
         config = MonitorConfig.Load(configPath);
         history = new HistoryStore(Path.Combine(dataDirectory, "history.csv"), config.HistoryRetentionDays);
-        if (config.WslEnabled) agent = new WslAgentManager(config.WslDistribution, Path.Combine(AppContext.BaseDirectory, "wsl", "agent.py"), dataDirectory, config.WslAgentIntervalSeconds);
+        logger.Info($"Application starting; data={dataDirectory}; drives={string.Join('|', config.Drives)}; WSL={config.WslEnabled}; distribution={config.WslDistribution}; interval={config.WslAgentIntervalSeconds}s");
+        if (config.WslEnabled) agent = new WslAgentManager(config.WslDistribution, Path.Combine(AppContext.BaseDirectory, "wsl", "agent.py"), dataDirectory, config.WslAgentIntervalSeconds, logger);
         var menu = new ContextMenuStrip();
         menu.Items.Add("Показать состояние", null, (_, _) => ShowStatus());
         menu.Items.Add("Обновить сейчас", null, async (_, _) => await RefreshAsync(true));
@@ -65,7 +77,7 @@ internal sealed class MonitorContext : ApplicationContext
         menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Выход", null, (_, _) => ExitThread());
-        tray = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "Disk Space Monitor", Icon = MakeIcon(Color.LimeGreen) };
+        tray = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "Disk Space Monitor", Icon = IconFor(Color.LimeGreen) };
         tray.DoubleClick += (_, _) => ShowStatus();
         timer = new System.Windows.Forms.Timer { Interval = 5000 };
         timer.Tick += async (_, _) => await RefreshAsync(false);
@@ -96,14 +108,15 @@ internal sealed class MonitorContext : ApplicationContext
     private void RequestAnalysis()
     {
         if (agent is null || DateTimeOffset.UtcNow - lastAnalysisRequest < TimeSpan.FromMinutes(10)) return;
-        try { agent.RequestAnalysis(); lastAnalysisRequest = DateTimeOffset.UtcNow; analysisItem.Enabled = false; }
-        catch (Exception ex) { MessageBox.Show(ex.Message, "Ошибка анализа", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        try { agent.RequestAnalysis(); lastAnalysisRequest = DateTimeOffset.UtcNow; analysisItem.Enabled = false; logger.Info("WSL directory analysis requested"); }
+        catch (Exception ex) { logger.Error("Could not request WSL directory analysis", ex); MessageBox.Show(ex.Message, "Ошибка анализа", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
     private async Task RefreshAsync(bool force)
     {
         if (polling) return;
         polling = true;
+        var started = Stopwatch.GetTimestamp();
         try
         {
             if (agent is not null) await agent.EnsureRunningAsync();
@@ -118,7 +131,7 @@ internal sealed class MonitorContext : ApplicationContext
                     var total = drive.TotalSize / 1073741824d;
                     var free = drive.AvailableFreeSpace / 1073741824d;
                     var used = total - free;
-                    var trendSamples = history.Get(name).ToList();
+                    var trendSamples = history.GetRecent(name, now).ToList();
                     trendSamples.Add(new UsageSample(now, used));
                     var trend = Metrics.CalculateTrend(trendSamples, free, now);
                     var level = Metrics.Level(free, config);
@@ -130,7 +143,17 @@ internal sealed class MonitorContext : ApplicationContext
             }
             drives = next;
             wsl = agent?.Read();
-            vhdx = agent is null ? null : VhdxLocator.Get(agent.Distribution ?? config.WslDistribution);
+            if (agent is null) vhdx = null;
+            else if (now - lastVhdxRead >= TimeSpan.FromSeconds(30))
+            {
+                vhdx = VhdxLocator.Get(agent.Distribution ?? config.WslDistribution);
+                lastVhdxRead = now;
+            }
+            if (vhdx is not null)
+            {
+                var hostDrive = next.FirstOrDefault(d => d.Error is null && string.Equals(d.Name, Path.GetPathRoot(vhdx.Path), StringComparison.OrdinalIgnoreCase));
+                if (hostDrive is not null) vhdx = vhdx with { HostFreeGiB = hostDrive.FreeGiB };
+            }
             if (wsl is not null)
             {
                 var age = now - wsl.Timestamp;
@@ -138,7 +161,7 @@ internal sealed class MonitorContext : ApplicationContext
                 {
                     var name = "WSL /";
                     var effectiveFree = Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB);
-                    var trendSamples = history.Get(name).ToList();
+                    var trendSamples = history.GetRecent(name, now).ToList();
                     trendSamples.Add(new UsageSample(now, wsl.UsedGiB));
                     wslTrend = Metrics.CalculateTrend(trendSamples, effectiveFree, now);
                     var wslLevel = Metrics.Level(effectiveFree, config);
@@ -153,13 +176,30 @@ internal sealed class MonitorContext : ApplicationContext
             if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, vhdx);
             if (force && statusForm.Visible) statusForm.Activate();
             analysisItem.Enabled = agent is not null && now - lastAnalysisRequest >= TimeSpan.FromMinutes(10);
+            if (lastRefreshError is not null) { logger.Info("Refresh recovered after: " + lastRefreshError); lastRefreshError = null; }
         }
         catch (Exception ex)
         {
             var message = "Ошибка обновления: " + ex.Message;
             tray.Text = message[..Math.Min(63, message.Length)];
+            if (lastRefreshError != message) { logger.Error("Refresh failed", ex); lastRefreshError = message; }
         }
-        finally { polling = false; }
+        finally
+        {
+            var durationMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            refreshCount++;
+            refreshTotalMs += durationMs;
+            refreshMaxMs = Math.Max(refreshMaxMs, durationMs);
+            var now = DateTimeOffset.UtcNow;
+            if (now - lastPerfLog >= TimeSpan.FromMinutes(10))
+            {
+                var cpu = Process.GetCurrentProcess().TotalProcessorTime;
+                logger.Info($"Performance 10min: refreshes={refreshCount}, avgMs={refreshTotalMs / refreshCount:F1}, maxMs={refreshMaxMs:F1}, appCpuMs={(cpu - cpuAtLastPerfLog).TotalMilliseconds:F0}, workingSetMiB={Environment.WorkingSet / 1048576d:F1}");
+                lastPerfLog = now; cpuAtLastPerfLog = cpu;
+                refreshCount = 0; refreshTotalMs = 0; refreshMaxMs = 0;
+            }
+            polling = false;
+        }
     }
 
     private void Alert(string name, DangerLevel level, Trend trend, double free)
@@ -175,6 +215,7 @@ internal sealed class MonitorContext : ApplicationContext
         if (alertTimes.TryGetValue(key, out var last) && now - last < TimeSpan.FromMinutes(config.AlertCooldownMinutes)) return;
         alertTimes[key] = now;
         tray.ShowBalloonTip(5000, "Disk Space Monitor", message, ToolTipIcon.Warning);
+        logger.Info("Alert: " + message);
     }
 
     private string WslStatus(DateTimeOffset now) => !config.WslEnabled ? "отключен" :
@@ -188,9 +229,8 @@ internal sealed class MonitorContext : ApplicationContext
         var level = double.IsNaN(free) ? DangerLevel.Normal : Metrics.Level(free, config);
         blink = !blink;
         var color = level == DangerLevel.Emergency ? (blink ? Color.Red : Color.White) : level == DangerLevel.Critical ? Color.Red : level == DangerLevel.Warning ? Color.Gold : Color.LimeGreen;
-        var old = tray.Icon;
-        tray.Icon = MakeIcon(color);
-        old?.Dispose();
+        var icon = IconFor(color);
+        if (!ReferenceEquals(tray.Icon, icon)) tray.Icon = icon;
         var freeText = double.IsNaN(free) ? "нет данных" : $"{free:F1} GiB";
         tray.Text = $"Мин. остаток: {freeText}; WSL: {WslStatus(now)}"[..Math.Min(63, $"Мин. остаток: {freeText}; WSL: {WslStatus(now)}".Length)];
     }
@@ -211,6 +251,12 @@ internal sealed class MonitorContext : ApplicationContext
         return result;
     }
 
+    private Icon IconFor(Color color)
+    {
+        if (!icons.TryGetValue(color, out var icon)) icons[color] = icon = MakeIcon(color);
+        return icon;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr icon);
 
@@ -224,9 +270,11 @@ internal sealed class MonitorContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        logger.Info("Application exiting");
         timer.Stop(); timer.Dispose();
         agent?.Dispose();
         tray.Visible = false; tray.Dispose();
+        foreach (var icon in icons.Values) icon.Dispose();
         statusForm.Dispose();
         base.ExitThreadCore();
     }

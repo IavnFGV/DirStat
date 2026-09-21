@@ -9,3 +9,5 @@ wsl-metrics.json
 wsl-metrics.json.lock
 wsl-analysis-request.json
 *.tmp
+monitor.log*
+wsl-agent.log*
