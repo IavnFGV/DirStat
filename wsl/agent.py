@@ -74,7 +74,7 @@ def process_writes(previous, elapsed):
             if pid in previous and elapsed > 0:
                 rate = max(0, written - previous[pid]) / elapsed
                 processes.append({'pid': pid, 'command': command[:120], 'writeBytesPerSecond': rate})
-                if top is None or rate > top['writeBytesPerSecond']:
+                if rate > 0 and (top is None or rate > top['writeBytesPerSecond']):
                     top = {'pid': pid, 'command': command[:120], 'writeBytesPerSecond': rate}
         except (OSError, ValueError, KeyError, IndexError):
             continue
@@ -156,7 +156,9 @@ def main():
             analysis_thread = None
         payload = {
             'schemaVersion': 1, 'timestamp': timestamp(), 'hostname': socket.gethostname(),
-            **filesystem(), 'topWriter': top, 'processes': processes, 'directories': directories,
+            **filesystem(), 'topWriter': top,
+            'totalWriteBytesPerSecond': sum(item['writeBytesPerSecond'] for item in processes),
+            'processes': processes, 'directories': directories,
             'directoryAnalysisTimestamp': analysis_timestamp,
         }
         atomic_json(args.output, payload)

@@ -6,10 +6,11 @@ internal sealed class StatusForm : Form
 {
     private readonly DataGridView windows = Grid();
     private readonly DataGridView linux = Grid();
+    private readonly DataGridView writers = Grid();
     private readonly DataGridView directories = Grid();
     private readonly Label wslStatus = new() { Dock = DockStyle.Top, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly Label details = new() { Dock = DockStyle.Top, Height = 48, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly Label vhdxDetails = new() { Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+    private readonly Label details = new() { Dock = DockStyle.Top, Height = 62, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label vhdxDetails = new() { Dock = DockStyle.Top, Height = 48, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
     private readonly ToolTip vhdxTip = new();
 
     public StatusForm()
@@ -21,15 +22,20 @@ internal sealed class StatusForm : Form
         var winTab = new TabPage("Windows"); winTab.Controls.Add(windows);
         var wslTab = new TabPage("WSL");
         var panel = new Panel { Dock = DockStyle.Fill };
-        var upper = new Panel { Dock = DockStyle.Top, Height = 260 };
+        var upper = new Panel { Dock = DockStyle.Top, Height = 290 };
         upper.Controls.Add(linux); upper.Controls.Add(vhdxDetails); upper.Controls.Add(details); upper.Controls.Add(wslStatus);
-        var title = new Label { Dock = DockStyle.Top, Height = 28, Text = "Размеры каталогов (последний ручной анализ)", TextAlign = ContentAlignment.MiddleLeft };
-        panel.Controls.Add(directories); panel.Controls.Add(title); panel.Controls.Add(upper);
+        var lower = new TabControl { Dock = DockStyle.Fill };
+        var writersTab = new TabPage("Пишущие процессы"); writersTab.Controls.Add(writers);
+        var directoryTab = new TabPage("Каталоги (последний анализ)"); directoryTab.Controls.Add(directories);
+        lower.TabPages.Add(writersTab); lower.TabPages.Add(directoryTab);
+        panel.Controls.Add(lower); panel.Controls.Add(upper);
         wslTab.Controls.Add(panel);
         tabs.TabPages.Add(winTab); tabs.TabPages.Add(wslTab);
         Controls.Add(tabs);
         windows.Columns.AddRange(Col("Диск"), Col("Всего GiB"), Col("Занято GiB"), Col("Свободно GiB"), Col("% занято"), Col("Δ GiB"), Col("Рост GiB/мин"), Col("ETA"), Col("Состояние"));
-        linux.Columns.AddRange(Col("ФС"), Col("Всего GiB"), Col("Занято GiB"), Col("Доступно GiB"), Col("% занято"), Col("Рост GiB/мин"), Col("ETA"), Col("Состояние"));
+        linux.Columns.AddRange(Col("ФС"), Col("Занято ext4 GiB"), Col("Доступно ext4 GiB"), Col("До упора GiB"), Col("Запись MiB/с"), Col("Рост GiB/мин"), Col("ETA"), Col("Состояние"));
+        linux.Columns[3].ToolTipText = "Оценка: меньшее из доступного внутри ext4 и свободного на разделе Windows с VHDX";
+        writers.Columns.AddRange(Col("PID"), Col("Команда"), Col("Запись"));
         directories.Columns.AddRange(Col("Каталог"), Col("Размер GiB"), Col("Ошибка"));
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
     }
@@ -42,6 +48,8 @@ internal sealed class StatusForm : Form
     };
     private static DataGridViewTextBoxColumn Col(string name) => new() { HeaderText = name, SortMode = DataGridViewColumnSortMode.NotSortable };
     private static string Eta(TimeSpan? value) => value is null ? "—" : value.Value.TotalDays >= 1 ? $"{value.Value.TotalDays:F1} д" : $"{value.Value.TotalHours:F1} ч";
+    private static string WriteRate(double bytesPerSecond) => bytesPerSecond >= 1048576 ? $"{bytesPerSecond / 1048576:F2} MiB/с" :
+        bytesPerSecond >= 1024 ? $"{bytesPerSecond / 1024:F1} KiB/с" : $"{bytesPerSecond:F0} Б/с";
 
     private static void Tint(DataGridViewRow row, DangerLevel level)
     {
@@ -57,15 +65,22 @@ internal sealed class StatusForm : Form
             Tint(row, disk.Level);
         }
         wslStatus.Text = "WSL: " + status;
-        vhdxDetails.Text = vhdx is null ? "Файл VHDX: не найден" : $"Файл VHDX: {vhdx.Path} ({vhdx.SizeGiB:F1} GiB)";
+        vhdxDetails.Text = vhdx is null ? "Файл VHDX на Windows: не найден; оценка свободного места учитывает только ext4" :
+            $"VHDX на Windows: файл {vhdx.SizeGiB:F1} GiB, на диске {(vhdx.OnDiskGiB is null ? "—" : $"{vhdx.OnDiskGiB:F1} GiB")}, " +
+            $"на {Path.GetPathRoot(vhdx.Path)} свободно {(vhdx.HostFreeGiB is null ? "—" : $"{vhdx.HostFreeGiB:F1} GiB")}\n{vhdx.Path}";
         vhdxTip.SetToolTip(vhdxDetails, vhdx?.Path);
-        linux.Rows.Clear(); directories.Rows.Clear();
+        linux.Rows.Clear(); writers.Rows.Clear(); directories.Rows.Clear();
         if (wsl is null) { details.Text = "Метрики отсутствуют"; return; }
-        var level = Metrics.Level(wsl.AvailableGiB, config);
-        var rowWsl = linux.Rows[linux.Rows.Add("/", wsl.TotalGiB.ToString("F1"), wsl.UsedGiB.ToString("F1"), wsl.AvailableGiB.ToString("F1"), wsl.UsedPercent.ToString("F1"), trend.GrowthGiBPerMinute.ToString("F2"), Eta(trend.Eta), level.ToString())];
+        var effectiveFree = Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB);
+        var level = Metrics.Level(effectiveFree, config);
+        var rowWsl = linux.Rows[linux.Rows.Add("/", wsl.UsedGiB.ToString("F1"), wsl.AvailableGiB.ToString("F1"), effectiveFree.ToString("F1"), (wsl.TotalWriteBytesPerSecond / 1048576).ToString("F2"), trend.GrowthGiBPerMinute.ToString("F2"), Eta(trend.Eta), level.ToString())];
         Tint(rowWsl, level);
-        details.Text = $"Хост: {wsl.Hostname}  •  Время: {wsl.Timestamp.LocalDateTime:G}  •  Свободно всего: {wsl.FreeGiB:F1} GiB  •  Резерв: {wsl.ReservedGiB:F1} GiB\n" +
-            (wsl.TopWriter is null ? "Активный процесс записи: нет данных" : $"Максимальная запись: PID {wsl.TopWriter.Pid}, {wsl.TopWriter.Command}, {wsl.TopWriter.WriteBytesPerSecond / 1048576:F2} MiB/с");
+        details.Text = $"Хост: {wsl.Hostname}  •  Время: {wsl.Timestamp.LocalDateTime:G}\n" +
+            $"Виртуальный лимит ext4: {wsl.TotalGiB:F1} GiB  •  Занято {wsl.UsedPercent:F1}% лимита  •  Резерв ext4: {wsl.ReservedGiB:F1} GiB\n" +
+            (wsl.TopWriter is null ? "Запись процессов пользователя: 0 Б/с; активного процесса нет" :
+                $"Запись процессов пользователя: {WriteRate(wsl.TotalWriteBytesPerSecond)}; максимум PID {wsl.TopWriter.Pid} ({wsl.TopWriter.Command}) — {WriteRate(wsl.TopWriter.WriteBytesPerSecond)}");
+        foreach (var item in wsl.Processes.Where(item => item.WriteBytesPerSecond > 0))
+            writers.Rows.Add(item.Pid, item.Command, WriteRate(item.WriteBytesPerSecond));
         foreach (var item in wsl.Directories) directories.Rows.Add(item.Path, item.SizeGiB.ToString("F2"), item.Error ?? "");
     }
 }

@@ -38,6 +38,7 @@ internal sealed class MonitorContext : ApplicationContext
     private readonly ToolStripMenuItem analysisItem;
     private List<DiskReading> drives = new();
     private WslSnapshot? wsl;
+    private VhdxInfo? vhdx;
     private Trend wslTrend = new(0, 0, null);
     private DangerLevel previousWslLevel = DangerLevel.Normal;
     private bool polling, blink;
@@ -129,17 +130,19 @@ internal sealed class MonitorContext : ApplicationContext
             }
             drives = next;
             wsl = agent?.Read();
+            vhdx = agent is null ? null : VhdxLocator.Get(agent.Distribution ?? config.WslDistribution);
             if (wsl is not null)
             {
                 var age = now - wsl.Timestamp;
                 if (age < TimeSpan.FromSeconds(Math.Max(30, config.WslAgentIntervalSeconds * 3)))
                 {
                     var name = "WSL /";
+                    var effectiveFree = Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB);
                     var trendSamples = history.Get(name).ToList();
                     trendSamples.Add(new UsageSample(now, wsl.UsedGiB));
-                    wslTrend = Metrics.CalculateTrend(trendSamples, wsl.AvailableGiB, now);
-                    var wslLevel = Metrics.Level(wsl.AvailableGiB, config);
-                    Alert(name, wslLevel, wslTrend, wsl.AvailableGiB);
+                    wslTrend = Metrics.CalculateTrend(trendSamples, effectiveFree, now);
+                    var wslLevel = Metrics.Level(effectiveFree, config);
+                    Alert(name, wslLevel, wslTrend, effectiveFree);
                     if (wslLevel >= DangerLevel.Critical && previousWslLevel < DangerLevel.Critical) RequestAnalysis();
                     previousWslLevel = wslLevel;
                     values[name] = wsl.UsedGiB;
@@ -147,7 +150,7 @@ internal sealed class MonitorContext : ApplicationContext
             }
             history.Record(values, now);
             UpdateTray(now);
-            if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, VhdxLocator.Get(agent?.Distribution ?? config.WslDistribution));
+            if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, vhdx);
             if (force && statusForm.Visible) statusForm.Activate();
             analysisItem.Enabled = agent is not null && now - lastAnalysisRequest >= TimeSpan.FromMinutes(10);
         }
@@ -181,7 +184,7 @@ internal sealed class MonitorContext : ApplicationContext
 
     private void UpdateTray(DateTimeOffset now)
     {
-        var free = drives.Where(d => d.Error is null).Select(d => d.FreeGiB).Concat(wsl is not null && WslStatus(now) == "работает" ? new[] { wsl.AvailableGiB } : Array.Empty<double>()).DefaultIfEmpty(double.NaN).Min();
+        var free = drives.Where(d => d.Error is null).Select(d => d.FreeGiB).Concat(wsl is not null && WslStatus(now) == "работает" ? new[] { Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB) } : Array.Empty<double>()).DefaultIfEmpty(double.NaN).Min();
         var level = double.IsNaN(free) ? DangerLevel.Normal : Metrics.Level(free, config);
         blink = !blink;
         var color = level == DangerLevel.Emergency ? (blink ? Color.Red : Color.White) : level == DangerLevel.Critical ? Color.Red : level == DangerLevel.Warning ? Color.Gold : Color.LimeGreen;
@@ -213,7 +216,7 @@ internal sealed class MonitorContext : ApplicationContext
 
     private void ShowStatus()
     {
-        statusForm.UpdateData(drives, wsl, WslStatus(DateTimeOffset.UtcNow), config, wslTrend, VhdxLocator.Get(agent?.Distribution ?? config.WslDistribution));
+        statusForm.UpdateData(drives, wsl, WslStatus(DateTimeOffset.UtcNow), config, wslTrend, vhdx);
         statusForm.Show();
         statusForm.WindowState = FormWindowState.Normal;
         statusForm.Activate();

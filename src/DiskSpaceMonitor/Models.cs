@@ -52,6 +52,9 @@ public static class Metrics
         freeGiB < config.CriticalFreeGiB ? DangerLevel.Critical :
         freeGiB < config.WarningFreeGiB ? DangerLevel.Warning : DangerLevel.Normal;
 
+    public static double EffectiveWslFree(double availableGiB, double? hostFreeGiB) =>
+        hostFreeGiB is >= 0 ? Math.Min(availableGiB, hostFreeGiB.Value) : availableGiB;
+
     public static Trend CalculateTrend(IReadOnlyList<UsageSample> samples, double freeGiB, DateTimeOffset now)
     {
         var recent = samples.Where(s => s.Timestamp >= now.AddMinutes(-5) && s.Timestamp <= now).OrderBy(s => s.Timestamp).ToList();
@@ -76,6 +79,7 @@ public sealed class WslSnapshot
     public double ReservedGiB { get; set; }
     public double UsedPercent { get; set; }
     public WriterInfo? TopWriter { get; set; }
+    public double TotalWriteBytesPerSecond { get; set; }
     public List<WriterInfo> Processes { get; set; } = new();
     public List<DirectoryInfoResult> Directories { get; set; } = new();
     public DateTimeOffset? DirectoryAnalysisTimestamp { get; set; }

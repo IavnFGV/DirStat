@@ -1,8 +1,9 @@
 using Microsoft.Win32;
+using System.Runtime.InteropServices;
 
 namespace DiskSpaceMonitor;
 
-internal sealed record VhdxInfo(string Path, double SizeGiB);
+internal sealed record VhdxInfo(string Path, double SizeGiB, double? OnDiskGiB, double? HostFreeGiB);
 
 internal static class VhdxLocator
 {
@@ -20,10 +21,23 @@ internal static class VhdxLocator
                 var fileName = key?.GetValue("VhdFileName") as string ?? "ext4.vhdx";
                 if (basePath.Length == 0 || fileName != Path.GetFileName(fileName)) return null;
                 var path = Path.Combine(basePath, fileName);
-                if (File.Exists(path)) return new VhdxInfo(path, new FileInfo(path).Length / 1073741824d);
+                if (!File.Exists(path)) return null;
+                double? hostFree = null;
+                try { hostFree = new DriveInfo(Path.GetPathRoot(path)!).AvailableFreeSpace / 1073741824d; } catch { }
+                return new VhdxInfo(path, new FileInfo(path).Length / 1073741824d, AllocatedGiB(path), hostFree);
             }
         }
         catch { }
         return null;
     }
+
+    private static double? AllocatedGiB(string path)
+    {
+        var low = GetCompressedFileSize(path, out var high);
+        if (low == uint.MaxValue && Marshal.GetLastWin32Error() != 0) return null;
+        return (((ulong)high << 32) | low) / 1073741824d;
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "GetCompressedFileSizeW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetCompressedFileSize(string fileName, out uint fileSizeHigh);
 }
