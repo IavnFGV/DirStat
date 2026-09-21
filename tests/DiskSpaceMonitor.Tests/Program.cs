@@ -28,4 +28,5 @@ catch (InvalidDataException) { Check(true, "schema validation"); }
 var wslNames = WslDiscovery.ParseList(Encoding.Unicode.GetBytes("Ubuntu\r\ndocker-desktop\r\n"));
 Check(wslNames.SequenceEqual(new[] { "Ubuntu", "docker-desktop" }), "WSL UTF-16 list");
 Check(WslDiscovery.Choose(new[] { "docker-desktop", "Ubuntu" }) == "Ubuntu", "WSL automatic selection");
+Check(WslDiscovery.NormalizeWindowsPath(@"D:\projects\DirStat\wsl\agent.py") == "D:/projects/DirStat/wsl/agent.py", "WSL path argument");
 Console.WriteLine($"{count} tests passed");

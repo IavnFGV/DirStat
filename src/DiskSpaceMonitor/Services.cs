@@ -99,12 +99,12 @@ public sealed class WslAgentManager : IDisposable
     {
         using var p = new Process { StartInfo = new ProcessStartInfo("wsl.exe") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true } };
         p.StartInfo.ArgumentList.Add("-d"); p.StartInfo.ArgumentList.Add(distribution);
-        p.StartInfo.ArgumentList.Add("--"); p.StartInfo.ArgumentList.Add("wslpath"); p.StartInfo.ArgumentList.Add("-a"); p.StartInfo.ArgumentList.Add("-u"); p.StartInfo.ArgumentList.Add(windowsPath);
+        p.StartInfo.ArgumentList.Add("--"); p.StartInfo.ArgumentList.Add("wslpath"); p.StartInfo.ArgumentList.Add("-a"); p.StartInfo.ArgumentList.Add("-u"); p.StartInfo.ArgumentList.Add(WslDiscovery.NormalizeWindowsPath(windowsPath));
         p.Start();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         await p.WaitForExitAsync(timeout.Token);
         var value = (await p.StandardOutput.ReadToEndAsync()).Trim();
-        if (p.ExitCode != 0 || value.Length == 0) throw new InvalidOperationException("WSL дистрибутив недоступен: " + (await p.StandardError.ReadToEndAsync()).Trim());
+        if (p.ExitCode != 0 || value.Length == 0) throw new InvalidOperationException("Не удалось преобразовать путь для WSL: " + (await p.StandardError.ReadToEndAsync()).Trim());
         return value;
     }
 
@@ -161,6 +161,8 @@ public sealed class WslAgentManager : IDisposable
 
 public static class WslDiscovery
 {
+    public static string NormalizeWindowsPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
+
     public static IReadOnlyList<string> ParseList(byte[] output)
     {
         var isUtf16 = output.Length >= 2 && (output[0] == 0xff && output[1] == 0xfe ||

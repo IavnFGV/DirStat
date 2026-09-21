@@ -174,7 +174,10 @@ internal sealed class MonitorContext : ApplicationContext
         tray.ShowBalloonTip(5000, "Disk Space Monitor", message, ToolTipIcon.Warning);
     }
 
-    private string WslStatus(DateTimeOffset now) => !config.WslEnabled ? "отключен" : wsl is null ? agent?.Status ?? "недоступен" : now - wsl.Timestamp > TimeSpan.FromSeconds(Math.Max(30, config.WslAgentIntervalSeconds * 3)) ? "устаревшие метрики" : "работает";
+    private string WslStatus(DateTimeOffset now) => !config.WslEnabled ? "отключен" :
+        agent?.Status.StartsWith("WSL недоступен", StringComparison.Ordinal) == true ? agent.Status :
+        wsl is null ? agent?.Status ?? "недоступен" :
+        now - wsl.Timestamp > TimeSpan.FromSeconds(Math.Max(30, config.WslAgentIntervalSeconds * 3)) ? "устаревшие метрики" : "работает";
 
     private void UpdateTray(DateTimeOffset now)
     {
