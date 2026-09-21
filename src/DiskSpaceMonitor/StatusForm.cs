@@ -9,7 +9,8 @@ internal sealed class StatusForm : Form
     private readonly DataGridView directories = Grid();
     private readonly Label wslStatus = new() { Dock = DockStyle.Top, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Label details = new() { Dock = DockStyle.Top, Height = 48, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly Label vhdxDetails = new() { Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label vhdxDetails = new() { Dock = DockStyle.Top, Height = 26, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+    private readonly ToolTip vhdxTip = new();
 
     public StatusForm()
     {
@@ -47,7 +48,7 @@ internal sealed class StatusForm : Form
         row.DefaultCellStyle.BackColor = level switch { DangerLevel.Emergency => Color.LightCoral, DangerLevel.Critical => Color.MistyRose, DangerLevel.Warning => Color.LightYellow, _ => Color.White };
     }
 
-    public void UpdateData(IEnumerable<DiskReading> drives, WslSnapshot? wsl, string status, MonitorConfig config, Trend trend, double? vhdxGiB = null)
+    public void UpdateData(IEnumerable<DiskReading> drives, WslSnapshot? wsl, string status, MonitorConfig config, Trend trend, VhdxInfo? vhdx = null)
     {
         windows.Rows.Clear();
         foreach (var disk in drives)
@@ -56,7 +57,8 @@ internal sealed class StatusForm : Form
             Tint(row, disk.Level);
         }
         wslStatus.Text = "WSL: " + status;
-        vhdxDetails.Text = vhdxGiB is null ? "Файл ext4.vhdx: не найден" : $"Файл ext4.vhdx на Windows: {vhdxGiB:F1} GiB. Освобождённые в Linux блоки могут пока оставаться в этом файле.";
+        vhdxDetails.Text = vhdx is null ? "Файл VHDX: не найден" : $"Файл VHDX: {vhdx.Path} ({vhdx.SizeGiB:F1} GiB)";
+        vhdxTip.SetToolTip(vhdxDetails, vhdx?.Path);
         linux.Rows.Clear(); directories.Rows.Clear();
         if (wsl is null) { details.Text = "Метрики отсутствуют"; return; }
         var level = Metrics.Level(wsl.AvailableGiB, config);

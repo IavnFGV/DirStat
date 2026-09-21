@@ -2,9 +2,11 @@ using Microsoft.Win32;
 
 namespace DiskSpaceMonitor;
 
+internal sealed record VhdxInfo(string Path, double SizeGiB);
+
 internal static class VhdxLocator
 {
-    public static double? SizeGiB(string distribution)
+    public static VhdxInfo? Get(string distribution)
     {
         try
         {
@@ -15,8 +17,10 @@ internal static class VhdxLocator
                 using var key = root.OpenSubKey(name);
                 if (!string.Equals(key?.GetValue("DistributionName") as string, distribution, StringComparison.OrdinalIgnoreCase)) continue;
                 var basePath = Environment.ExpandEnvironmentVariables(key?.GetValue("BasePath") as string ?? "");
-                var path = Path.Combine(basePath, "ext4.vhdx");
-                if (File.Exists(path)) return new FileInfo(path).Length / 1073741824d;
+                var fileName = key?.GetValue("VhdFileName") as string ?? "ext4.vhdx";
+                if (basePath.Length == 0 || fileName != Path.GetFileName(fileName)) return null;
+                var path = Path.Combine(basePath, fileName);
+                if (File.Exists(path)) return new VhdxInfo(path, new FileInfo(path).Length / 1073741824d);
             }
         }
         catch { }

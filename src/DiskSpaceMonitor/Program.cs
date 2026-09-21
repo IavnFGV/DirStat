@@ -147,7 +147,7 @@ internal sealed class MonitorContext : ApplicationContext
             }
             history.Record(values, now);
             UpdateTray(now);
-            if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, VhdxLocator.SizeGiB(agent?.Distribution ?? config.WslDistribution));
+            if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, VhdxLocator.Get(agent?.Distribution ?? config.WslDistribution));
             if (force && statusForm.Visible) statusForm.Activate();
             analysisItem.Enabled = agent is not null && now - lastAnalysisRequest >= TimeSpan.FromMinutes(10);
         }
@@ -210,7 +210,7 @@ internal sealed class MonitorContext : ApplicationContext
 
     private void ShowStatus()
     {
-        statusForm.UpdateData(drives, wsl, WslStatus(DateTimeOffset.UtcNow), config, wslTrend, VhdxLocator.SizeGiB(agent?.Distribution ?? config.WslDistribution));
+        statusForm.UpdateData(drives, wsl, WslStatus(DateTimeOffset.UtcNow), config, wslTrend, VhdxLocator.Get(agent?.Distribution ?? config.WslDistribution));
         statusForm.Show();
         statusForm.WindowState = FormWindowState.Normal;
         statusForm.Activate();
