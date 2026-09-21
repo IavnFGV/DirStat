@@ -14,13 +14,18 @@ internal static class Program
         using var mutex = new Mutex(true, @"Local\DiskSpaceMonitor.SingleInstance", out var first);
         if (!first) return;
         ApplicationConfiguration.Initialize();
-        Application.Run(new MonitorContext());
+        try { Application.Run(new MonitorContext()); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Не удалось запустить Disk Space Monitor: {ex.Message}\nПроверьте права записи рядом с EXE.",
+                "Disk Space Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 }
 
 internal sealed class MonitorContext : ApplicationContext
 {
-    private readonly string dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiskSpaceMonitor");
+    private readonly string dataDirectory = AppContext.BaseDirectory;
     private readonly string configPath;
     private readonly NotifyIcon tray;
     private readonly System.Windows.Forms.Timer timer;
@@ -42,12 +47,7 @@ internal sealed class MonitorContext : ApplicationContext
     {
         Directory.CreateDirectory(dataDirectory);
         configPath = Path.Combine(dataDirectory, "config.json");
-        try { config = MonitorConfig.Load(configPath); }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Ошибка конфигурации: {ex.Message}\n{configPath}", "Disk Space Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            throw;
-        }
+        config = MonitorConfig.Load(configPath);
         history = new HistoryStore(Path.Combine(dataDirectory, "history.csv"), config.HistoryRetentionDays);
         if (config.WslEnabled) agent = new WslAgentManager(config.WslDistribution, Path.Combine(AppContext.BaseDirectory, "wsl", "agent.py"), dataDirectory, config.WslAgentIntervalSeconds);
         var menu = new ContextMenuStrip();
@@ -147,7 +147,7 @@ internal sealed class MonitorContext : ApplicationContext
             }
             history.Record(values, now);
             UpdateTray(now);
-            if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, VhdxLocator.SizeGiB(config.WslDistribution));
+            if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, VhdxLocator.SizeGiB(agent?.Distribution ?? config.WslDistribution));
             if (force && statusForm.Visible) statusForm.Activate();
             analysisItem.Enabled = agent is not null && now - lastAnalysisRequest >= TimeSpan.FromMinutes(10);
         }
@@ -210,7 +210,7 @@ internal sealed class MonitorContext : ApplicationContext
 
     private void ShowStatus()
     {
-        statusForm.UpdateData(drives, wsl, WslStatus(DateTimeOffset.UtcNow), config, wslTrend, VhdxLocator.SizeGiB(config.WslDistribution));
+        statusForm.UpdateData(drives, wsl, WslStatus(DateTimeOffset.UtcNow), config, wslTrend, VhdxLocator.SizeGiB(agent?.Distribution ?? config.WslDistribution));
         statusForm.Show();
         statusForm.WindowState = FormWindowState.Normal;
         statusForm.Activate();

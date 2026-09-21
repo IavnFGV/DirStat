@@ -23,6 +23,16 @@ Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $portable -For
 Copy-Item -LiteralPath (Join-Path $root 'config.example.json') -Destination $portable -Force
 
 New-Item -ItemType Directory -Path $release -Force | Out-Null
-Compress-Archive -Path (Join-Path $portable '*') -DestinationPath (Join-Path $release 'DiskSpaceMonitor-win-x64.zip') -Force
-Compress-Archive -Path (Join-Path $compact '*') -DestinationPath (Join-Path $release 'DiskSpaceMonitor-win-x64-compact.zip') -Force
+$portableFiles = @(
+    (Join-Path $portable '*.exe'), (Join-Path $portable '*.dll'),
+    (Join-Path $portable 'wsl'), (Join-Path $portable 'README.md'),
+    (Join-Path $portable 'config.example.json')
+)
+$compactFiles = @(
+    (Join-Path $compact '*.exe'), (Join-Path $compact '*.dll'),
+    (Join-Path $compact 'wsl'), (Join-Path $compact 'README.md'),
+    (Join-Path $compact 'config.example.json'), (Join-Path $compact 'install-dotnet.ps1')
+)
+Compress-Archive -Path $portableFiles -DestinationPath (Join-Path $release 'DiskSpaceMonitor-win-x64.zip') -Force
+Compress-Archive -Path $compactFiles -DestinationPath (Join-Path $release 'DiskSpaceMonitor-win-x64-compact.zip') -Force
 Write-Host 'Release archives are ready in release\.' -ForegroundColor Green

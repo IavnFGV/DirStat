@@ -1,6 +1,6 @@
 {
   "Drives": ["C:\\"],
-  "WslDistribution": "Ubuntu-24.04",
+  "WslDistribution": "auto",
   "WslEnabled": true,
   "WslAgentIntervalSeconds": 5,
   "WarningFreeGiB": 30,

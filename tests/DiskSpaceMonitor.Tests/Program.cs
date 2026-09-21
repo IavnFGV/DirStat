@@ -1,4 +1,5 @@
 using DiskSpaceMonitor;
+using System.Text;
 
 var count = 0;
 void Check(bool condition, string name)
@@ -24,4 +25,7 @@ var snapshot = WslSnapshot.Parse(json);
 Check(snapshot.Hostname == "ubuntu" && snapshot.TopWriter?.Pid == 123 && snapshot.ReservedGiB == 5, "JSON parse");
 try { WslSnapshot.Parse(json.Replace("\"schemaVersion\":1", "\"schemaVersion\":2")); throw new Exception("schema validation failed"); }
 catch (InvalidDataException) { Check(true, "schema validation"); }
+var wslNames = WslDiscovery.ParseList(Encoding.Unicode.GetBytes("Ubuntu\r\ndocker-desktop\r\n"));
+Check(wslNames.SequenceEqual(new[] { "Ubuntu", "docker-desktop" }), "WSL UTF-16 list");
+Check(WslDiscovery.Choose(new[] { "docker-desktop", "Ubuntu" }) == "Ubuntu", "WSL automatic selection");
 Console.WriteLine($"{count} tests passed");

@@ -6,7 +6,7 @@ namespace DiskSpaceMonitor;
 public sealed class MonitorConfig
 {
     public List<string> Drives { get; set; } = new();
-    public string WslDistribution { get; set; } = "Ubuntu";
+    public string WslDistribution { get; set; } = "auto";
     public bool WslEnabled { get; set; } = true;
     public int WslAgentIntervalSeconds { get; set; } = 5;
     public double WarningFreeGiB { get; set; } = 30;

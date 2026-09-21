@@ -116,8 +116,7 @@ def main():
     if args.interval < 2:
         parser.error('interval must be at least 2 seconds')
     pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    lock_path = pathlib.Path.home() / '.cache' / 'disk-space-monitor-agent.lock'
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = pathlib.Path(args.output + '.lock')
     lock = open(lock_path, 'a+', encoding='utf-8')
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

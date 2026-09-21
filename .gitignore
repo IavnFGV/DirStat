@@ -3,3 +3,9 @@
 **/__pycache__/
 publish/
 release/
+config.json
+history.csv
+wsl-metrics.json
+wsl-metrics.json.lock
+wsl-analysis-request.json
+*.tmp
