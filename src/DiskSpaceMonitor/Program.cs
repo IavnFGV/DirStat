@@ -9,7 +9,16 @@ namespace DiskSpaceMonitor;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static int Main(string[] args)
+    {
+        // Elevated helper launched through UAC by the disk map: scan, write the file, exit.
+        // Runs before the single-instance check because the tray app is already running.
+        if (args.Length > 0 && args[0] == WindowsTreeScanner.ScanArgument) return WindowsTreeScanner.RunCommandLine(args);
+        Run();
+        return 0;
+    }
+
+    private static void Run()
     {
         using var mutex = new Mutex(true, @"Local\DiskSpaceMonitor.SingleInstance", out var first);
         if (!first) return;
@@ -39,6 +48,7 @@ internal sealed class MonitorContext : ApplicationContext
     private readonly Dictionary<Color, Icon> icons = new();
     private readonly StatusForm statusForm = new();
     private DiskMapForm? mapForm;
+    private WslMapSource? wslMapSource;
     private readonly ToolStripMenuItem startupItem;
     private readonly ToolStripMenuItem analysisItem;
     private List<DiskReading> drives = new();
@@ -71,7 +81,7 @@ internal sealed class MonitorContext : ApplicationContext
         analysisItem = new ToolStripMenuItem("Анализировать каталоги WSL", null, (_, _) => RequestAnalysis());
         analysisItem.Enabled = agent is not null;
         menu.Items.Add(analysisItem);
-        menu.Items.Add(new ToolStripMenuItem("Карта диска WSL…", null, (_, _) => ShowMap()) { Enabled = agent is not null });
+        menu.Items.Add("Карта диска (WSL и Windows)…", null, (_, _) => ShowMap());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Открыть конфигурацию", null, (_, _) => Open(configPath));
         menu.Items.Add("Открыть каталог данных", null, (_, _) => Open(dataDirectory));
@@ -176,7 +186,7 @@ internal sealed class MonitorContext : ApplicationContext
             UpdateTray(now);
             if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, vhdx);
             if (force && statusForm.Visible) statusForm.Activate();
-            if (mapForm?.Visible == true) mapForm.Tick(wsl?.TreeScan);
+            wslMapSource?.Update(wsl?.TreeScan);
             analysisItem.Enabled = agent is not null && now - lastAnalysisRequest >= TimeSpan.FromMinutes(10);
             if (lastRefreshError is not null) { logger.Info("Refresh recovered after: " + lastRefreshError); lastRefreshError = null; }
         }
@@ -286,17 +296,18 @@ internal sealed class MonitorContext : ApplicationContext
 
     private void ShowMap()
     {
-        if (agent is null) return;
-        mapForm ??= new DiskMapForm(agent.TreePath, () =>
+        if (mapForm is null)
         {
-            var id = agent.RequestTreeScan();
-            logger.Info("WSL tree scan requested");
-            return id;
-        });
+            var sources = new List<MapSource>();
+            if (agent is not null) sources.Add(wslMapSource = new WslMapSource(agent, logger));
+            foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed && d.IsReady))
+                sources.Add(new WindowsMapSource(drive.Name, dataDirectory, logger));
+            mapForm = new DiskMapForm(sources);
+        }
+        wslMapSource?.Update(wsl?.TreeScan);
         mapForm.Show();
-        mapForm.WindowState = mapForm.WindowState == FormWindowState.Minimized ? FormWindowState.Normal : mapForm.WindowState;
+        if (mapForm.WindowState == FormWindowState.Minimized) mapForm.WindowState = FormWindowState.Normal;
         mapForm.Activate();
-        mapForm.Tick(wsl?.TreeScan);
     }
 
     protected override void ExitThreadCore()

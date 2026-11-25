@@ -10,6 +10,7 @@ wsl-metrics.json.lock
 wsl-analysis-request.json
 wsl-tree.json
 wsl-tree-request.json
+windows-tree-*.json*
 *.tmp
 monitor.log*
 wsl-agent.log*

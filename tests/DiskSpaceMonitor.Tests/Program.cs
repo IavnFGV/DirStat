@@ -67,6 +67,25 @@ Check(small.Tree!.Children[0].DisplayName.Contains('7') && small.Tree.Children[0
 try { DiskTreeSnapshot.Parse("""{"schemaVersion":2,"tree":{"n":"/"}}"""); throw new Exception("tree schema validation failed"); }
 catch (InvalidDataException) { Check(true, "tree schema validation"); }
 Check(Units.Bytes(1536) == "2 KiB" && Units.Bytes(3L << 30) == $"{3.0:F2} GiB", "byte formatting");
+// File types: same rules as wsl/treescan.py.
+Check(FileTypes.Extension("movie.MP4") == ".mp4" && FileTypes.Extension("libssl.so.3") == ".so" && FileTypes.Extension("libfoo.so.1.2.3") == ".so", "file type versions and case");
+Check(FileTypes.Extension("README") == FileTypes.NoExtension && FileTypes.Extension(".bashrc") == FileTypes.NoExtension && FileTypes.Extension("name.") == FileTypes.NoExtension, "file type without extension");
+Check(FileTypes.Extension("archive.tar.gz") == ".gz" && FileTypes.Extension("blob.d41d8cd98f00b204e98") == FileTypes.NoExtension && FileTypes.Extension("log.1") == ".1", "file type suffix rules");
+
+// Tree accumulator: top-K eviction keeps bytes, small items fold, unaccounted space added.
+var accumulator = new TreeAccumulator(@"C:\");
+var bigDir = accumulator.AddDir(accumulator.Root, "big");
+for (var i = 1; i <= TreeAccumulator.KeepFilesPerDirectory + 10; i++) accumulator.AddFile(bigDir, $"f{i}.bin", i * 1_000_000L, ".bin");
+accumulator.AddFile(accumulator.Root, "tiny.txt", 100, ".txt");
+var expectedBytes = Enumerable.Range(1, TreeAccumulator.KeepFilesPerDirectory + 10).Sum(i => i * 1_000_000L) + 100;
+var built = accumulator.Build(@"C:\", expectedBytes + 500_000_000L);
+Check(built.ScannedBytes == expectedBytes && built.Tree!.Size == expectedBytes + 500_000_000L, "accumulator totals with unaccounted");
+Check(built.Tree!.Children.Single(c => c.Kind == "u").Size == 500_000_000L && built.UnaccountedBytes == 500_000_000L, "accumulator unaccounted node");
+var bigNode = built.Tree.Children.First(c => c.Name == "big");
+Check(bigNode.Size == expectedBytes - 100 && bigNode.Children.Where(c => c.Kind == "f").All(c => c.Size >= 11_000_000L), "accumulator keeps largest files");
+Check(bigNode.Children.Sum(c => c.Size) == bigNode.Size, "accumulator children sum to parent");
+Check(bigNode.Children.Single(c => c.Name == "f34.bin").FullPath == @"C:\big\f34.bin" && bigNode.Children[0].Kind == "o", "windows full path");
+
 var tempDirectory = Path.Combine(Path.GetTempPath(), "disk-space-monitor-test-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(tempDirectory);
 try
@@ -79,9 +98,29 @@ try
     var logger = new AppLogger(logPath, 256);
     for (var i = 0; i < 10; i++) logger.Info(new string('x', 80));
     Check(File.Exists(logPath + ".1") && new FileInfo(logPath).Length <= 256, "bounded log rotation");
+    // Real scan: hard link counted once when checked, file sizes rounded to clusters.
+    var scanRoot = Path.Combine(tempDirectory, "scan");
+    Directory.CreateDirectory(Path.Combine(scanRoot, "sub"));
+    File.WriteAllBytes(Path.Combine(scanRoot, "sub", "data.bin"), new byte[3 * 1024 * 1024]);
+    File.WriteAllBytes(Path.Combine(scanRoot, "note.txt"), new byte[10]);
+    Check(CreateHardLinkW(Path.Combine(scanRoot, "link.bin"), Path.Combine(scanRoot, "sub", "data.bin"), IntPtr.Zero), "test hard link created");
+    var plain = WindowsTreeScanner.Scan(scanRoot, new ScanProgress(), CancellationToken.None);
+    var deduped = WindowsTreeScanner.Scan(scanRoot, new ScanProgress(), CancellationToken.None, _ => true);
+    Check(plain.ScannedFiles == 3 && deduped.ScannedFiles == 2 && deduped.HardLinkDuplicateBytes >= 3 * 1024 * 1024, "windows scan hard link dedup");
+    Check(deduped.ScannedBytes % 512 == 0 && deduped.ScannedBytes >= 3 * 1024 * 1024 + 512, "windows scan cluster sizes");
+    Check(deduped.Extensions.Any(e => e.Ext == ".bin") && deduped.Tree!.FullPath == scanRoot && deduped.UnaccountedBytes == 0, "windows scan subfolder root");
+    var savedPath = Path.Combine(tempDirectory, "tree.json");
+    deduped.Save(savedPath);
+    var reloaded = DiskTreeSnapshot.Parse(File.ReadAllText(savedPath));
+    Check(reloaded.ScannedBytes == deduped.ScannedBytes && reloaded.HardLinkDuplicateBytes == deduped.HardLinkDuplicateBytes && reloaded.Tree!.DominantLeaf().Name is "data.bin" or "link.bin", "tree save and reload");
+    Directory.Delete(scanRoot, true);
+    File.Delete(savedPath);
     File.Delete(historyPath);
     File.Delete(logPath);
     File.Delete(logPath + ".1");
 }
 finally { Directory.Delete(tempDirectory); }
 Console.WriteLine($"{count} tests passed");
+
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+static extern bool CreateHardLinkW(string link, string existing, IntPtr security);

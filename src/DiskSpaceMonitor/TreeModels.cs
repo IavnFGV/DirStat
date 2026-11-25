@@ -44,8 +44,10 @@ public sealed class DiskTreeNode
             var names = new List<string>();
             for (var node = this; node is not null; node = node.Parent) names.Add(node.Parent is null ? node.Name : node.DisplayName);
             names.Reverse();
-            var root = names[0].TrimEnd('/');
-            return names.Count == 1 ? names[0] : root + "/" + string.Join('/', names.Skip(1));
+            // Windows roots (C:\) join with backslashes, WSL ("/") with slashes.
+            var separator = names[0].Contains('\\') ? '\\' : '/';
+            var root = names[0].TrimEnd('/', '\\');
+            return names.Count == 1 ? names[0] : root + separator + string.Join(separator, names.Skip(1));
         }
     }
 
@@ -93,6 +95,12 @@ public sealed class DiskTreeSnapshot
 
     public int SchemaVersion { get; set; }
     public string? RequestId { get; set; }
+    /// <summary>Windows scans only: whether the scan ran elevated and with backup privilege.</summary>
+    public bool? Elevated { get; set; }
+    public bool? BackupPrivilege { get; set; }
+    public long HardLinkDuplicateBytes { get; set; }
+    public long CloudFiles { get; set; }
+    public long CloudBytes { get; set; }
     public string Root { get; set; } = "/";
     public DateTimeOffset? Timestamp { get; set; }
     public double DurationSeconds { get; set; }
@@ -111,6 +119,19 @@ public sealed class DiskTreeSnapshot
         result.Tree.LinkParents();
         return result;
     }
+
+    private static readonly JsonSerializerOptions SaveOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase, MaxDepth = 1024,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    public void Save(string path)
+    {
+        var temp = path + ".tmp";
+        using (var stream = File.Create(temp)) JsonSerializer.Serialize(stream, this, SaveOptions);
+        File.Move(temp, path, true);
+    }
 }
 
 /// <summary>Progress of the agent's tree scan, embedded in wsl-metrics.json.</summary>
@@ -123,6 +144,26 @@ public sealed class TreeScanStatus
     public long Files { get; set; }
     public long Bytes { get; set; }
     public string? Error { get; set; }
+}
+
+/// <summary>File type rules shared with wsl/treescan.py; keep the two in sync.</summary>
+public static class FileTypes
+{
+    public const string NoExtension = "(без расширения)";
+    public const string NotFile = "(не файл)";
+    public const string OtherTypes = "(прочие типы)";
+
+    public static string Extension(string name)
+    {
+        var parts = name.ToLowerInvariant().Split('.');
+        var count = parts.Length;
+        // libfoo.so.1.2 -> .so: numeric version suffixes are not a type.
+        while (count > 2 && parts[count - 1].Length > 0 && parts[count - 1].All(char.IsAsciiDigit)) count--;
+        if (count < 2 || parts[0].Length == 0 && count == 2 || parts[count - 1].Length == 0) return NoExtension;
+        var ext = "." + parts[count - 1];
+        // Hash-like suffixes (cache entries, object stores) are not real types.
+        return ext.Length <= 10 ? ext : NoExtension;
+    }
 }
 
 public static class Units
