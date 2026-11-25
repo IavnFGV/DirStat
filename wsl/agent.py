@@ -111,7 +111,8 @@ def analysis_paths():
     paths = [home / 'projects', home / '.cache', home / '.local/share/containers',
              home / '.local/share/containers/storage']
     try:
-        paths.extend(p for p in home.iterdir() if p.is_dir() and p not in paths and not p.name.startswith('.'))
+        # Hidden dirs included: .ollama, .vscode-server, .nvm etc. often hold most of home.
+        paths.extend(p for p in home.iterdir() if p.is_dir() and not p.is_symlink() and p not in paths)
     except OSError:
         pass
     return list(dict.fromkeys(p for p in paths if p.exists()))
