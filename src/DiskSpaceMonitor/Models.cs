@@ -83,6 +83,7 @@ public sealed class WslSnapshot
     public List<WriterInfo> Processes { get; set; } = new();
     public List<DirectoryInfoResult> Directories { get; set; } = new();
     public DateTimeOffset? DirectoryAnalysisTimestamp { get; set; }
+    public TreeScanStatus? TreeScan { get; set; }
 
     public static WslSnapshot Parse(string json)
     {

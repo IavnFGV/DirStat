@@ -91,7 +91,7 @@ public sealed class HistoryStore
 
 public sealed class WslAgentManager : IDisposable
 {
-    private readonly string configuredDistribution, script, output, request;
+    private readonly string configuredDistribution, script, output, request, treeRequest;
     private readonly AppLogger logger;
     private string distribution = "";
     private readonly int interval;
@@ -118,7 +118,12 @@ public sealed class WslAgentManager : IDisposable
         this.interval = interval;
         output = Path.Combine(dataDirectory, "wsl-metrics.json");
         request = Path.Combine(dataDirectory, "wsl-analysis-request.json");
+        // The agent derives the tree files from --request/--output: same directory, fixed names.
+        treeRequest = Path.Combine(dataDirectory, "wsl-tree-request.json");
+        TreePath = Path.Combine(dataDirectory, "wsl-tree.json");
     }
+
+    public string TreePath { get; }
 
     private async Task<string> WslPathAsync(string windowsPath)
     {
@@ -241,11 +246,18 @@ public sealed class WslAgentManager : IDisposable
         return reader.ReadToEnd();
     }
 
-    public void RequestAnalysis()
+    public void RequestAnalysis() => WriteRequest(request);
+
+    /// <summary>Asks the agent for a full filesystem tree for the disk map; returns the request id.</summary>
+    public string RequestTreeScan() => WriteRequest(treeRequest);
+
+    private static string WriteRequest(string path)
     {
-        var temp = request + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(new { requestId = Guid.NewGuid().ToString("N"), timestamp = DateTimeOffset.UtcNow }));
-        File.Move(temp, request, true);
+        var id = Guid.NewGuid().ToString("N");
+        var temp = path + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(new { requestId = id, timestamp = DateTimeOffset.UtcNow }));
+        File.Move(temp, path, true);
+        return id;
     }
 
     private void Stop()

@@ -38,6 +38,7 @@ internal sealed class MonitorContext : ApplicationContext
     private readonly Dictionary<string, DateTimeOffset> alertTimes = new();
     private readonly Dictionary<Color, Icon> icons = new();
     private readonly StatusForm statusForm = new();
+    private DiskMapForm? mapForm;
     private readonly ToolStripMenuItem startupItem;
     private readonly ToolStripMenuItem analysisItem;
     private List<DiskReading> drives = new();
@@ -70,6 +71,7 @@ internal sealed class MonitorContext : ApplicationContext
         analysisItem = new ToolStripMenuItem("Анализировать каталоги WSL", null, (_, _) => RequestAnalysis());
         analysisItem.Enabled = agent is not null;
         menu.Items.Add(analysisItem);
+        menu.Items.Add(new ToolStripMenuItem("Карта диска WSL…", null, (_, _) => ShowMap()) { Enabled = agent is not null });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Открыть конфигурацию", null, (_, _) => Open(configPath));
         menu.Items.Add("Открыть каталог данных", null, (_, _) => Open(dataDirectory));
@@ -174,6 +176,7 @@ internal sealed class MonitorContext : ApplicationContext
             UpdateTray(now);
             if (statusForm.Visible) statusForm.UpdateData(drives, wsl, WslStatus(now), config, wslTrend, vhdx);
             if (force && statusForm.Visible) statusForm.Activate();
+            if (mapForm?.Visible == true) mapForm.Tick(wsl?.TreeScan);
             analysisItem.Enabled = agent is not null && now - lastAnalysisRequest >= TimeSpan.FromMinutes(10);
             if (lastRefreshError is not null) { logger.Info("Refresh recovered after: " + lastRefreshError); lastRefreshError = null; }
         }
@@ -281,6 +284,21 @@ internal sealed class MonitorContext : ApplicationContext
         statusForm.Activate();
     }
 
+    private void ShowMap()
+    {
+        if (agent is null) return;
+        mapForm ??= new DiskMapForm(agent.TreePath, () =>
+        {
+            var id = agent.RequestTreeScan();
+            logger.Info("WSL tree scan requested");
+            return id;
+        });
+        mapForm.Show();
+        mapForm.WindowState = mapForm.WindowState == FormWindowState.Minimized ? FormWindowState.Normal : mapForm.WindowState;
+        mapForm.Activate();
+        mapForm.Tick(wsl?.TreeScan);
+    }
+
     protected override void ExitThreadCore()
     {
         logger.Info("Application exiting");
@@ -289,6 +307,7 @@ internal sealed class MonitorContext : ApplicationContext
         tray.Visible = false; tray.Dispose();
         foreach (var icon in icons.Values) icon.Dispose();
         statusForm.Dispose();
+        mapForm?.Dispose();
         base.ExitThreadCore();
     }
 }

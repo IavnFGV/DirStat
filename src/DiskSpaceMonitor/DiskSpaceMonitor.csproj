@@ -8,6 +8,6 @@
     <AssemblyName>DiskSpaceMonitor</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <Content Include="..\..\wsl\agent.py" Link="wsl\agent.py" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\wsl\*.py" Link="wsl\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

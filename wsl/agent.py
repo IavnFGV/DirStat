@@ -15,6 +15,11 @@ import sys
 import threading
 import time
 
+# The agent ships with its helper module beside it; make that importable however
+# the agent is started (python3 path/agent.py, importlib in tests, any cwd).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import treescan  # noqa: E402
+
 GIB = 1024 ** 3
 ANALYSIS_COOLDOWN = 600
 REPLACE_ATTEMPTS = 6
@@ -32,13 +37,16 @@ def configure_logging(output):
     LOG.addHandler(handler)
 
 
-def atomic_json(path, data):
+def atomic_json(path, data, compact=False):
     target = pathlib.Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + '.tmp.' + str(os.getpid()))
     try:
         with open(temporary, 'w', encoding='utf-8') as stream:
-            json.dump(data, stream, ensure_ascii=False, indent=2)
+            if compact:
+                json.dump(data, stream, ensure_ascii=False, separators=(',', ':'))
+            else:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
         # On /mnt/<drive> (drvfs) Windows refuses to replace a file that a Windows
         # process is reading at this exact moment. Retry briefly instead of crashing.
         for attempt in range(REPLACE_ATTEMPTS):
@@ -169,6 +177,77 @@ def load_previous(output):
         return None, [], None
 
 
+def read_request_id(path):
+    try:
+        request = json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return request.get('requestId') if isinstance(request, dict) else None
+
+
+def load_tree_request(path):
+    """Id of the tree scan already written, so a restart does not rescan."""
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    return data.get('requestId') if isinstance(data, dict) else None
+
+
+class TreeScanner:
+    """Runs one tree scan at a time in a background thread and reports progress."""
+
+    def __init__(self, output, root='/'):
+        self.output = output
+        self.root = root
+        self.lock = threading.Lock()
+        self.thread = None
+        self.completed_request = load_tree_request(output)
+        self.status = {'state': 'done' if self.completed_request else 'idle',
+                       'requestId': self.completed_request}
+
+    def running(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def start(self, request_id):
+        if self.running():
+            return
+        with self.lock:
+            self.status = {'state': 'running', 'requestId': request_id, 'startedAt': timestamp(),
+                           'files': 0, 'bytes': 0}
+        self.thread = threading.Thread(target=self._run, args=(request_id,), daemon=True)
+        self.thread.start()
+
+    def _progress(self, files, total):
+        with self.lock:
+            self.status['files'] = files
+            self.status['bytes'] = total
+
+    def _run(self, request_id):
+        LOG.info('Tree scan started; request=%s root=%s', request_id, self.root)
+        try:
+            stat = os.statvfs(self.root)
+            used = (stat.f_blocks - stat.f_bfree) * stat.f_frsize
+            document = treescan.build(self.root, used, self._progress, timestamp())
+            document['requestId'] = request_id
+            atomic_json(self.output, document, compact=True)
+            self.completed_request = request_id
+            with self.lock:
+                self.status = {'state': 'done', 'requestId': request_id, 'finishedAt': timestamp(),
+                               'files': document['scannedFiles'], 'bytes': document['scannedBytes']}
+            LOG.info('Tree scan finished; files=%s bytes=%s errors=%s seconds=%s',
+                     document['scannedFiles'], document['scannedBytes'],
+                     document['errorCount'], document['durationSeconds'])
+        except Exception as error:
+            LOG.exception('Tree scan failed')
+            with self.lock:
+                self.status = {'state': 'error', 'requestId': request_id, 'error': str(error)[:300]}
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.status)
+
+
 def exit_when_stdin_closes():
     """The Windows app keeps stdin open. When wsl.exe exits or is killed the pipe
     closes; without this the Linux process would outlive it and hold the lock."""
@@ -187,6 +266,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--request', required=True)
     parser.add_argument('--interval', type=int, default=5)
+    parser.add_argument('--tree-request', help='tree scan request file (default: beside --request)')
+    parser.add_argument('--tree-output', help='tree scan result file (default: beside --output)')
     parser.add_argument('--exit-on-stdin-eof', action='store_true',
                         help='exit when stdin is closed (used by the Windows app)')
     args = parser.parse_args()
@@ -213,6 +294,8 @@ def main():
     write_error = None
     analysis_thread = None
     analysis_result = []
+    tree_request_path = args.tree_request or str(pathlib.Path(args.request).with_name('wsl-tree-request.json'))
+    tree = TreeScanner(args.tree_output or str(pathlib.Path(args.output).with_name('wsl-tree.json')))
     perf_since = time.monotonic()
     perf_samples = 0
     scan_total_ms = 0.0
@@ -233,11 +316,10 @@ def main():
         current, top, processes = process_writes(previous, max(0, started - previous_time))
         scan_ms = (time.monotonic() - started) * 1000
         previous, previous_time = current, started
-        try:
-            request = json.loads(pathlib.Path(args.request).read_text(encoding='utf-8'))
-            request_id = request.get('requestId') if isinstance(request, dict) else None
-        except (OSError, ValueError):
-            request_id = None
+        request_id = read_request_id(args.request)
+        tree_request = read_request_id(tree_request_path)
+        if tree_request and tree_request != tree.completed_request and                 tree.snapshot().get('requestId') != tree_request and not tree.running():
+            tree.start(tree_request)
         if (request_id and request_id != last_request and analysis_thread is None
                 and started - last_analysis >= ANALYSIS_COOLDOWN):
             last_request = request_id
@@ -259,6 +341,7 @@ def main():
             'processes': processes, 'directories': directories,
             'directoryAnalysisTimestamp': analysis_timestamp,
             'analysisRequestId': completed_request,
+            'treeScan': tree.snapshot(),
         }
         json_started = time.monotonic()
         try:

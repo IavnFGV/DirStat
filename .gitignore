@@ -8,6 +8,8 @@ history.csv
 wsl-metrics.json
 wsl-metrics.json.lock
 wsl-analysis-request.json
+wsl-tree.json
+wsl-tree-request.json
 *.tmp
 monitor.log*
 wsl-agent.log*
