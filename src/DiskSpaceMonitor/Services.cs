@@ -105,6 +105,8 @@ public sealed class WslAgentManager : IDisposable
     private long lastMetricsLength;
     private WslSnapshot? cachedSnapshot;
     private bool disposed;
+    private Task? startTask;
+    private const int AlreadyRunningExitCode = 2;
     public string Status { get; private set; } = "Запуск";
     public string? Distribution => distribution.Length == 0 ? null : distribution;
 
@@ -132,7 +134,18 @@ public sealed class WslAgentManager : IDisposable
         return value;
     }
 
-    public async Task EnsureRunningAsync(bool force = false)
+    /// <summary>
+    /// Single-flight: callers share one start attempt. The refresh loop does not
+    /// await this, so a slow or hung WSL never delays Windows drive monitoring.
+    /// </summary>
+    public Task EnsureRunningAsync(bool force = false)
+    {
+        if (startTask is { IsCompleted: false }) return startTask;
+        startTask = EnsureRunningCoreAsync(force);
+        return startTask;
+    }
+
+    private async Task EnsureRunningCoreAsync(bool force)
     {
         if (disposed) return;
         var now = DateTimeOffset.UtcNow;
@@ -144,11 +157,22 @@ public sealed class WslAgentManager : IDisposable
         }
         if (process is { HasExited: true } && !exitReported)
         {
-            consecutiveFailures++;
-            nextRetry = now.AddSeconds(RetrySeconds());
-            Status = "WSL недоступен: агент завершился";
-            logger.Error($"WSL agent exited with code {process.ExitCode}; retry in {RetrySeconds()}s");
             exitReported = true;
+            if (process.ExitCode == AlreadyRunningExitCode)
+            {
+                // Another agent (a manual run, or one left after the app crashed) holds the lock and keeps
+                // writing metrics. That is not a failure: keep using its data, check later.
+                nextRetry = now.AddMinutes(2);
+                Status = "Агент уже запущен другим процессом";
+                logger.Info("WSL agent lock is held by another instance; using its metrics, recheck in 120s");
+            }
+            else
+            {
+                consecutiveFailures++;
+                nextRetry = now.AddSeconds(RetrySeconds());
+                Status = "WSL недоступен: агент завершился";
+                logger.Error($"WSL agent exited with code {process.ExitCode}; retry in {RetrySeconds()}s");
+            }
         }
         if (!force && now < nextRetry) return;
         Stop();
@@ -156,14 +180,17 @@ public sealed class WslAgentManager : IDisposable
         {
             distribution = await WslDiscovery.ResolveAsync(configuredDistribution);
             var paths = await Task.WhenAll(WslPathAsync(script), WslPathAsync(output), WslPathAsync(request));
-            var info = new ProcessStartInfo("wsl.exe") { UseShellExecute = false, CreateNoWindow = true };
-            foreach (var arg in new[] { "-d", distribution, "--", "python3", "-u", paths[0], "--output", paths[1], "--request", paths[2], "--interval", interval.ToString(CultureInfo.InvariantCulture) }) info.ArgumentList.Add(arg);
+            if (disposed) return;
+            // stdin stays open for the agent's lifetime; when wsl.exe dies the pipe closes
+            // and --exit-on-stdin-eof makes the Linux process exit instead of lingering.
+            var info = new ProcessStartInfo("wsl.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true };
+            foreach (var arg in new[] { "-d", distribution, "--", "python3", "-u", paths[0], "--output", paths[1], "--request", paths[2], "--interval", interval.ToString(CultureInfo.InvariantCulture), "--exit-on-stdin-eof" }) info.ArgumentList.Add(arg);
             process = new Process { StartInfo = info };
             process.Start();
             Status = "Агент запущен: " + distribution;
-            launchTime = now;
+            launchTime = DateTimeOffset.UtcNow;
             exitReported = false;
-            nextRetry = now.AddSeconds(20);
+            nextRetry = launchTime.AddSeconds(20);
             logger.Info($"WSL agent started; distribution={distribution}; pid={process.Id}; interval={interval}s");
         }
         catch (Exception ex)
@@ -180,14 +207,13 @@ public sealed class WslAgentManager : IDisposable
 
     public WslSnapshot? Read()
     {
-        if (process is { HasExited: true }) Status = "WSL недоступен: агент завершился";
         try
         {
             var file = new FileInfo(output);
             if (!file.Exists) return null;
             if (cachedSnapshot is not null && file.LastWriteTimeUtc == lastMetricsWrite && file.Length == lastMetricsLength)
                 return cachedSnapshot;
-            var snapshot = WslSnapshot.Parse(File.ReadAllText(output));
+            var snapshot = WslSnapshot.Parse(ReadShared(output));
             lastMetricsWrite = file.LastWriteTimeUtc;
             lastMetricsLength = file.Length;
             cachedSnapshot = snapshot;
@@ -202,6 +228,19 @@ public sealed class WslAgentManager : IDisposable
         }
     }
 
+    /// <summary>
+    /// The agent replaces this file every few seconds through drvfs. Opening it with
+    /// FileShare.Delete lets that rename succeed while we are reading.
+    /// </summary>
+    public static FileStream OpenShared(string path) =>
+        new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+
+    public static string ReadShared(string path)
+    {
+        using var reader = new StreamReader(OpenShared(path), Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
     public void RequestAnalysis()
     {
         var temp = request + ".tmp";
@@ -212,7 +251,16 @@ public sealed class WslAgentManager : IDisposable
     private void Stop()
     {
         if (process is null) return;
-        try { if (!process.HasExited) process.Kill(true); } catch { }
+        try
+        {
+            if (!process.HasExited)
+            {
+                // Graceful first: closing stdin makes the agent exit and release its lock.
+                try { process.StandardInput.Close(); } catch { }
+                if (!process.WaitForExit(3000)) process.Kill(true);
+            }
+        }
+        catch { }
         process.Dispose();
         process = null;
     }

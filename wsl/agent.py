@@ -8,6 +8,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -16,6 +17,8 @@ import time
 
 GIB = 1024 ** 3
 ANALYSIS_COOLDOWN = 600
+REPLACE_ATTEMPTS = 6
+ALREADY_RUNNING = 2
 LOG = logging.getLogger('disk_space_monitor_agent')
 
 
@@ -36,7 +39,16 @@ def atomic_json(path, data):
     try:
         with open(temporary, 'w', encoding='utf-8') as stream:
             json.dump(data, stream, ensure_ascii=False, indent=2)
-        os.replace(temporary, target)
+        # On /mnt/<drive> (drvfs) Windows refuses to replace a file that a Windows
+        # process is reading at this exact moment. Retry briefly instead of crashing.
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, target)
+                return
+            except PermissionError:
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -105,19 +117,68 @@ def analysis_paths():
     return list(dict.fromkeys(p for p in paths if p.exists()))
 
 
+def du_command(path):
+    """Rootless Podman stores layers under subordinate UIDs; plain du cannot read
+    them and undercounts, so measure that tree inside the user namespace."""
+    command = ['du', '-skx', '--', str(path)]
+    containers = pathlib.Path.home() / '.local/share/containers'
+    if (path == containers or containers in path.parents) and shutil.which('podman'):
+        return ['podman', 'unshare'] + command
+    return command
+
+
+def parse_du(path, returncode, stdout, stderr):
+    """du exits with 1 when some entries are unreadable but still prints the total."""
+    try:
+        size = int(stdout.split()[0]) * 1024 / GIB
+    except (IndexError, ValueError):
+        return {'path': str(path), 'sizeGiB': 0, 'error': (stderr.strip() or f'du exit {returncode}')[:200]}
+    if returncode == 0:
+        return {'path': str(path), 'sizeGiB': size, 'error': None}
+    errors = [line for line in stderr.splitlines() if line.strip()]
+    first = errors[0] if errors else f'du exit {returncode}'
+    return {'path': str(path), 'sizeGiB': size,
+            'error': f'Частично: не прочитано {len(errors)} объектов, размер занижен. {first}'[:200]}
+
+
 def analyze():
     results = []
     for path in analysis_paths():
         try:
-            run = subprocess.run(['du', '-sk', '--', str(path)], capture_output=True,
+            run = subprocess.run(du_command(path), capture_output=True,
                                  text=True, timeout=180, check=False)
-            if run.returncode != 0:
-                results.append({'path': str(path), 'sizeGiB': 0, 'error': run.stderr.strip()[:200]})
-            else:
-                results.append({'path': str(path), 'sizeGiB': int(run.stdout.split()[0]) * 1024 / GIB, 'error': None})
-        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            results.append(parse_du(path, run.returncode, run.stdout, run.stderr))
+        except (OSError, subprocess.TimeoutExpired) as error:
             results.append({'path': str(path), 'sizeGiB': 0, 'error': str(error)[:200]})
     return results
+
+
+def load_previous(output):
+    """Restore the last analysis so a restarted agent neither loses it nor
+    re-runs du for a request that was already handled."""
+    try:
+        data = json.loads(pathlib.Path(output).read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            return None, [], None
+        directories = data.get('directories')
+        return (data.get('analysisRequestId'),
+                directories if isinstance(directories, list) else [],
+                data.get('directoryAnalysisTimestamp'))
+    except (OSError, ValueError):
+        return None, [], None
+
+
+def exit_when_stdin_closes():
+    """The Windows app keeps stdin open. When wsl.exe exits or is killed the pipe
+    closes; without this the Linux process would outlive it and hold the lock."""
+    try:
+        while sys.stdin.buffer.read(4096):
+            pass
+    except (OSError, ValueError):
+        pass
+    LOG.info('stdin closed; agent exiting')
+    logging.shutdown()
+    os._exit(0)
 
 
 def main():
@@ -125,6 +186,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--request', required=True)
     parser.add_argument('--interval', type=int, default=5)
+    parser.add_argument('--exit-on-stdin-eof', action='store_true',
+                        help='exit when stdin is closed (used by the Windows app)')
     args = parser.parse_args()
     if args.interval < 2:
         parser.error('interval must be at least 2 seconds')
@@ -137,14 +200,16 @@ def main():
     except BlockingIOError:
         LOG.warning('Agent already running for output=%s', args.output)
         print('Agent already running for this output', file=sys.stderr)
-        return 2
+        return ALREADY_RUNNING
+    if args.exit_on_stdin_eof:
+        threading.Thread(target=exit_when_stdin_closes, daemon=True).start()
     LOG.info('Agent started; pid=%s interval=%ss output=%s', os.getpid(), args.interval, args.output)
     previous = {}
     previous_time = time.monotonic()
-    last_request = None
+    completed_request, directories, analysis_timestamp = load_previous(args.output)
+    last_request = completed_request
     last_analysis = 0.0
-    directories = []
-    analysis_timestamp = None
+    write_error = None
     analysis_thread = None
     analysis_result = []
     perf_since = time.monotonic()
@@ -169,10 +234,11 @@ def main():
         previous, previous_time = current, started
         try:
             request = json.loads(pathlib.Path(args.request).read_text(encoding='utf-8'))
-            request_id = request.get('requestId')
+            request_id = request.get('requestId') if isinstance(request, dict) else None
         except (OSError, ValueError):
             request_id = None
-        if request_id and request_id != last_request and started - last_analysis >= ANALYSIS_COOLDOWN:
+        if (request_id and request_id != last_request and analysis_thread is None
+                and started - last_analysis >= ANALYSIS_COOLDOWN):
             last_request = request_id
             last_analysis = started
             LOG.info('Directory analysis started; request=%s', request_id)
@@ -181,6 +247,7 @@ def main():
         if analysis_thread is not None and not analysis_thread.is_alive():
             directories = analysis_result
             analysis_timestamp = timestamp()
+            completed_request = last_request
             LOG.info('Directory analysis finished; paths=%s errors=%s', len(directories),
                      sum(bool(item.get('error')) for item in directories))
             analysis_thread = None
@@ -190,9 +257,19 @@ def main():
             'totalWriteBytesPerSecond': sum(item['writeBytesPerSecond'] for item in processes),
             'processes': processes, 'directories': directories,
             'directoryAnalysisTimestamp': analysis_timestamp,
+            'analysisRequestId': completed_request,
         }
         json_started = time.monotonic()
-        atomic_json(args.output, payload)
+        try:
+            atomic_json(args.output, payload)
+            if write_error is not None:
+                LOG.info('Metrics JSON writable again after: %s', write_error)
+                write_error = None
+        except OSError as error:
+            # One skipped sample is harmless; crashing the agent is not.
+            if str(error) != write_error:
+                LOG.warning('Metrics JSON write failed, sample skipped: %s', error)
+                write_error = str(error)
         json_ms = (time.monotonic() - json_started) * 1000
         perf_samples += 1
         scan_total_ms += scan_ms

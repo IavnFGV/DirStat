@@ -65,8 +65,8 @@ internal sealed class MonitorContext : ApplicationContext
         if (config.WslEnabled) agent = new WslAgentManager(config.WslDistribution, Path.Combine(AppContext.BaseDirectory, "wsl", "agent.py"), dataDirectory, config.WslAgentIntervalSeconds, logger);
         var menu = new ContextMenuStrip();
         menu.Items.Add("Показать состояние", null, (_, _) => ShowStatus());
-        menu.Items.Add("Обновить сейчас", null, async (_, _) => await RefreshAsync(true));
-        menu.Items.Add("Запустить / перезапустить агент WSL", null, async (_, _) => { if (agent is not null) await agent.EnsureRunningAsync(true); await RefreshAsync(true); });
+        menu.Items.Add("Обновить сейчас", null, (_, _) => Refresh(true));
+        menu.Items.Add("Запустить / перезапустить агент WSL", null, async (_, _) => { if (agent is not null) await agent.EnsureRunningAsync(true); Refresh(true); });
         analysisItem = new ToolStripMenuItem("Анализировать каталоги WSL", null, (_, _) => RequestAnalysis());
         analysisItem.Enabled = agent is not null;
         menu.Items.Add(analysisItem);
@@ -80,9 +80,9 @@ internal sealed class MonitorContext : ApplicationContext
         tray = new NotifyIcon { ContextMenuStrip = menu, Visible = true, Text = "Disk Space Monitor", Icon = IconFor(Color.LimeGreen) };
         tray.DoubleClick += (_, _) => ShowStatus();
         timer = new System.Windows.Forms.Timer { Interval = 5000 };
-        timer.Tick += async (_, _) => await RefreshAsync(false);
+        timer.Tick += (_, _) => Refresh(false);
         timer.Start();
-        _ = RefreshAsync(true);
+        Refresh(true);
     }
 
     private static void Open(string path)
@@ -112,14 +112,14 @@ internal sealed class MonitorContext : ApplicationContext
         catch (Exception ex) { logger.Error("Could not request WSL directory analysis", ex); MessageBox.Show(ex.Message, "Ошибка анализа", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
-    private async Task RefreshAsync(bool force)
+    private void Refresh(bool force)
     {
         if (polling) return;
         polling = true;
         var started = Stopwatch.GetTimestamp();
         try
         {
-            if (agent is not null) await agent.EnsureRunningAsync();
+            KeepAgentRunning();
             var now = DateTimeOffset.UtcNow;
             var next = new List<DiskReading>();
             var values = new Dictionary<string, double>();
@@ -156,8 +156,7 @@ internal sealed class MonitorContext : ApplicationContext
             }
             if (wsl is not null)
             {
-                var age = now - wsl.Timestamp;
-                if (age < TimeSpan.FromSeconds(Math.Max(30, config.WslAgentIntervalSeconds * 3)))
+                if (IsWslFresh(now))
                 {
                     var name = "WSL /";
                     var effectiveFree = Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB);
@@ -218,21 +217,35 @@ internal sealed class MonitorContext : ApplicationContext
         logger.Info("Alert: " + message);
     }
 
+    // Not awaited: WSL start can take tens of seconds (VM boot, wslpath timeouts),
+    // and Windows drives must keep being monitored meanwhile.
+    private async void KeepAgentRunning()
+    {
+        if (agent is null) return;
+        try { await agent.EnsureRunningAsync(); }
+        catch (Exception ex) { logger.Error("WSL agent supervision failed", ex); }
+    }
+
+    private bool IsWslFresh(DateTimeOffset now) =>
+        wsl is not null && now - wsl.Timestamp <= TimeSpan.FromSeconds(Math.Max(30, config.WslAgentIntervalSeconds * 3));
+
+    // Fresh metrics win over the launcher's last message: data is what matters.
     private string WslStatus(DateTimeOffset now) => !config.WslEnabled ? "отключен" :
-        agent?.Status.StartsWith("WSL недоступен", StringComparison.Ordinal) == true ? agent.Status :
-        wsl is null ? agent?.Status ?? "недоступен" :
-        now - wsl.Timestamp > TimeSpan.FromSeconds(Math.Max(30, config.WslAgentIntervalSeconds * 3)) ? "устаревшие метрики" : "работает";
+        IsWslFresh(now) ? "работает" :
+        wsl is not null && agent?.Status.StartsWith("Агент запущен", StringComparison.Ordinal) == true ? "устаревшие метрики" :
+        agent?.Status ?? "недоступен";
 
     private void UpdateTray(DateTimeOffset now)
     {
-        var free = drives.Where(d => d.Error is null).Select(d => d.FreeGiB).Concat(wsl is not null && WslStatus(now) == "работает" ? new[] { Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB) } : Array.Empty<double>()).DefaultIfEmpty(double.NaN).Min();
+        var free = drives.Where(d => d.Error is null).Select(d => d.FreeGiB).Concat(wsl is not null && IsWslFresh(now) ? new[] { Metrics.EffectiveWslFree(wsl.AvailableGiB, vhdx?.HostFreeGiB) } : Array.Empty<double>()).DefaultIfEmpty(double.NaN).Min();
         var level = double.IsNaN(free) ? DangerLevel.Normal : Metrics.Level(free, config);
         blink = !blink;
         var color = level == DangerLevel.Emergency ? (blink ? Color.Red : Color.White) : level == DangerLevel.Critical ? Color.Red : level == DangerLevel.Warning ? Color.Gold : Color.LimeGreen;
         var icon = IconFor(color);
         if (!ReferenceEquals(tray.Icon, icon)) tray.Icon = icon;
         var freeText = double.IsNaN(free) ? "нет данных" : $"{free:F1} GiB";
-        tray.Text = $"Мин. остаток: {freeText}; WSL: {WslStatus(now)}"[..Math.Min(63, $"Мин. остаток: {freeText}; WSL: {WslStatus(now)}".Length)];
+        var text = $"Мин. остаток: {freeText}; WSL: {WslStatus(now)}";
+        tray.Text = text[..Math.Min(63, text.Length)];
     }
 
     private static Icon MakeIcon(Color color)
