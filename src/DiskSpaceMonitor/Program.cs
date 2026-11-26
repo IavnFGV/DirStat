@@ -6,6 +6,16 @@ using Microsoft.Win32;
 
 namespace DiskSpaceMonitor;
 
+internal static class AppInfo
+{
+    private static readonly Version AssemblyVersion = typeof(AppInfo).Assembly.GetName().Version ?? new Version(0, 0, 0, 0);
+
+    /// <summary>"1.1.0 (сборка 7)"; local builds without a build number show "1.1.0 (локальная сборка)".</summary>
+    public static string Version { get; } = AssemblyVersion.Revision > 0
+        ? $"{AssemblyVersion.ToString(3)} (сборка {AssemblyVersion.Revision})"
+        : $"{AssemblyVersion.ToString(3)} (локальная сборка)";
+}
+
 internal static class Program
 {
     [STAThread]

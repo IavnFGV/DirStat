@@ -53,7 +53,7 @@ internal sealed class DiskMapForm : Form
 
     public DiskMapForm(IReadOnlyList<MapSource> sources)
     {
-        Text = "Disk Space Monitor — карта диска";
+        Text = "Disk Space Monitor — карта диска · " + AppInfo.Version;
         Width = 1320; Height = 860; MinimumSize = new Size(900, 560);
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;

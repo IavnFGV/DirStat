@@ -15,7 +15,7 @@ internal sealed class StatusForm : Form
 
     public StatusForm()
     {
-        Text = "Disk Space Monitor — состояние";
+        Text = "Disk Space Monitor — состояние · " + AppInfo.Version;
         Width = 1100; Height = 720; MinimumSize = new Size(750, 500);
         StartPosition = FormStartPosition.CenterScreen;
         var tabs = new TabControl { Dock = DockStyle.Fill };

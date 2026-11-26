@@ -1,0 +1,72 @@
+name: Build
+
+# Every push to main is a release: version = VERSION + build number (see get-version.ps1).
+# Pull requests only build and test. Documentation-only pushes do not release.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Agent tests
+        run: |
+          python3 tests/test_agent_logic.py
+          python3 tests/test_wsl_agent.py
+          python3 tests/test_treescan.py
+
+  build:
+    needs: python-tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Compute version
+        id: version
+        shell: pwsh
+        run: |
+          $version = ./get-version.ps1
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "build=$($version.Split('.')[-1])" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $version"
+      - name: Build, test and package
+        shell: pwsh
+        run: ./publish.ps1 -BuildNumber ${{ steps.version.outputs.build }}
+      - name: Create GitHub release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          $tag = "v$env:VERSION"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) { Write-Host "Release $tag already exists"; exit 0 }
+          $prefix = $env:VERSION.Substring(0, $env:VERSION.LastIndexOf('.'))
+          gh release create $tag `
+            "release/DiskSpaceMonitor-win-x64.zip" `
+            "release/DiskSpaceMonitor-win-x64-compact.zip" `
+            "install-dotnet.ps1" `
+            --target "${{ github.sha }}" `
+            --title "Disk Space Monitor $prefix (сборка $env:BUILD)" `
+            --generate-notes

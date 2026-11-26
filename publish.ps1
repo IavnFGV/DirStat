@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+param([int]$BuildNumber = 0)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -8,10 +9,10 @@ $portable = Join-Path $root 'publish/win-x64'
 $compact = Join-Path $root 'release/compact'
 $release = Join-Path $root 'release'
 
-& (Join-Path $root 'build.ps1') -Publish
+& (Join-Path $root 'build.ps1') -Publish -BuildNumber $BuildNumber
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-dotnet publish $project -c Release -r win-x64 --self-contained false `
+dotnet publish $project -c Release -p:BuildNumber=$BuildNumber -r win-x64 --self-contained false `
     -p:PublishSingleFile=true -p:PublishReadyToRun=false -p:PublishTrimmed=false `
     -p:DebugType=none -o $compact
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
